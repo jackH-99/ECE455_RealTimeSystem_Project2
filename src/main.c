@@ -224,14 +224,13 @@ void xWorkloadTask_1(void *pvParameters);
 void xWorkloadTask_2(void *pvParameters);
 void xWorkloadTask_3(void *pvParameters);
 
-void xDeadline_Driven_Task_Generator();
-void xDDS_Task();
+void xDeadline_Driven_Task_Generator(void *pvParameters);
+void xDDS_Task(void *pvParameters);
 
 QueueHandle_t xRespQueue = NULL;
 QueueHandle_t xReqQueue = NULL;
 QueueHandle_t xCompleteQueue = NULL;
 QueueHandle_t xReleaseQueue = NULL;
-QueueHandle_t xCreateQueue = NULL;
 
 #define MAX_USER_TASK_PRIORITY (configMAX_PRIORITIES - 1)
 
@@ -257,18 +256,18 @@ int main(void)
 
 	xTaskCreate(xDDS_Task,
 			"DDS",
-			1024,
+			512,
 		    NULL,
 			MAX_USER_TASK_PRIORITY,
 			&xDDSHandle);
 
 	xTaskCreate(xMonitor_Task, "MT",
-							   1024,
+							   128,
 							   NULL, MAX_USER_TASK_PRIORITY - 2,
 							   &xMonitorHandle);
 
 	xTaskCreate(xDeadline_Driven_Task_Generator, "DDTG",
-							   1024,
+							   128,
 							   NULL,
 							   MAX_USER_TASK_PRIORITY - 1,
 							   &xDDTGHandle);
@@ -287,13 +286,14 @@ int main(void)
 
 /*-----------------------------------------------------------*/
 
-void xDDS_Task()
+void xDDS_Task(void *pvParameters)
 {
+	(void)pvParameters;
 	while(1)
 	{
 
 		dd_task *req_dd_task;
-		if (xQueueReceive(xCreateQueue, &req_dd_task, 0) == pdPASS)
+		if (xQueueReceive(xReleaseQueue, &req_dd_task, 0) == pdPASS)
 		{
 			dd_task *new_dd_task = pvPortMalloc(sizeof(dd_task));
 			new_dd_task->t_handle = req_dd_task->t_handle;
@@ -301,7 +301,7 @@ void xDDS_Task()
 			new_dd_task->release_time = xTaskGetTickCount();
 			new_dd_task->absolute_deadline = req_dd_task->release_time + req_dd_task->absolute_deadline;
 			new_dd_task->completion_time = 0;
-
+			printf("Task %lu released at %lu", new_dd_task->task_id, new_dd_task->release_time);
 			//implement these
 			insert_sorted(new_dd_task); // implemented
 			assign_priorities(); //implemented
@@ -309,6 +309,8 @@ void xDDS_Task()
 		uint32_t completed_id;
 		if (xQueueReceive(xCompleteQueue, &completed_id, 0) == pdPASS)
 		{
+			uint32_t completed_time = xTaskGetTickCount();
+			printf("Task %lu completed at %lu", completed_id, completed_time);
 			//move to completed finds the id and sets the completion time
 			move_to_completed(completed_id);
 			assign_priorities();
@@ -346,16 +348,17 @@ void xDDS_Task()
 			xQueueSend(xRespQueue, &dd_count_msg, portMAX_DELAY);
 		}
 
-		vTaskDelay(1);
-
+		vTaskDelay(10);
 	}
 
 }
 /*-----------------------------------------------------------*/
 
-void xDeadline_Driven_Task_Generator()
+void xDeadline_Driven_Task_Generator(void *pvParameters)
 {
+	(void)pvParameters;
 	workload_type next = WORKLOAD_1;
+	uint32_t id = 0;
 
 	while(1)
 	{
@@ -366,8 +369,8 @@ void xDeadline_Driven_Task_Generator()
 		{
 		case WORKLOAD_1:
 		{
-
-			xTaskCreate(xWorkloadTask_1, "WLT1", 1024, NULL, tskIDLE_PRIORITY, &h);
+			id = 1;
+			xTaskCreate(xWorkloadTask_1, "WLT1", 384, (void *)id, tskIDLE_PRIORITY, &h);
 			release_dd_task(h, PERIODIC, 1, pdMS_TO_TICKS(95));
 			next = WORKLOAD_2;
 			vTaskDelay(500);
@@ -375,7 +378,7 @@ void xDeadline_Driven_Task_Generator()
 		}
 		case WORKLOAD_2:
 		{
-			xTaskCreate(xWorkloadTask_2, "WLT2", 1024, NULL, tskIDLE_PRIORITY, &h);
+			xTaskCreate(xWorkloadTask_2, "WLT2", 384, (void *)id, tskIDLE_PRIORITY, &h);
 			release_dd_task(h, PERIODIC, 2, pdMS_TO_TICKS(150));
 
 			next = WORKLOAD_3;
@@ -384,7 +387,7 @@ void xDeadline_Driven_Task_Generator()
 		}
 		case WORKLOAD_3:
 		{
-			xTaskCreate(xWorkloadTask_3, "WLT3", 1024, NULL, tskIDLE_PRIORITY, &h);
+			xTaskCreate(xWorkloadTask_3, "WLT3", 384, (void *)id, tskIDLE_PRIORITY, &h);
 			release_dd_task(h, PERIODIC, 3, pdMS_TO_TICKS(250));
 			next = WORKLOAD_1;
 			vTaskDelay(500);
@@ -404,12 +407,15 @@ void xDeadline_Driven_Task_Generator()
 // I think I have to use for loops
 void xWorkloadTask_1(void *pvParameters)
 {
-	uint32_t id = *(uint32_t *)pvParameters;
-	vPortFree(pvParameters);
-	uint32_t start = xTaskGetTickCount();
-	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95));
-	complete_dd_task(id); // NO
+	uint32_t id = (uint32_t)pvParameters;
+	TickType_t start = xTaskGetTickCount();
+	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95)){
+		//nothing
+	}
+	//complete_dd_task(id); // NO
 	vTaskDelete(NULL);
+
+	for (;;) {}
 }
 
 /*-----------------------------------------------------------*/
@@ -417,7 +423,6 @@ void xWorkloadTask_1(void *pvParameters)
 void xWorkloadTask_2(void *pvParameters)
 {
 	uint32_t id = *(uint32_t *)pvParameters;
-	vPortFree(pvParameters);
 	uint32_t start = xTaskGetTickCount();
 	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(150));
 	complete_dd_task(id);
@@ -427,11 +432,10 @@ void xWorkloadTask_2(void *pvParameters)
 /*-----------------------------------------------------------*/
 void xWorkloadTask_3(void *pvParameters)
 {
-	uint32_t id = *(uint32_t *)pvParameters;
-	vPortFree(pvParameters);
+	uint32_t id = (uint32_t)pvParameters;
 	uint32_t start = xTaskGetTickCount();
 	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(250));
-	complete_dd_task(id); // NO
+	complete_dd_task(id);
 	vTaskDelete(NULL);
 }
 /*-----------------------------------------------------------*/
@@ -599,6 +603,8 @@ uint32_t get_active_task_list(void)
 
 void xMonitor_Task(void *pvParameters)
 {
+	vTaskDelay(pdMS_TO_TICKS(1500)); // One HyperPeriod
+	(void)pvParameters;
 	unsigned int num_active;
 	unsigned int num_overdue;
 	unsigned int num_completed;
@@ -610,7 +616,7 @@ void xMonitor_Task(void *pvParameters)
 	printf("Active: %u, Completed: %u, Overdue: %u\n",
 			num_active, num_completed, num_overdue);
 
-	vTaskDelay(pdMS_TO_TICKS(1500)); // One HyperPeriod
+
 }
 void vApplicationMallocFailedHook( void )
 {
