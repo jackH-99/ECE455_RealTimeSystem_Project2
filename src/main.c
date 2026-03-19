@@ -292,14 +292,14 @@ void xDDS_Task(void *pvParameters)
 	while(1)
 	{
 
-		dd_task *req_dd_task;
+		dd_task req_dd_task;
 		if (xQueueReceive(xReleaseQueue, &req_dd_task, 0) == pdPASS)
 		{
 			dd_task *new_dd_task = pvPortMalloc(sizeof(dd_task));
-			new_dd_task->t_handle = req_dd_task->t_handle;
-			new_dd_task->task_id = req_dd_task->task_id;
+			new_dd_task->t_handle = req_dd_task.t_handle;
+			new_dd_task->task_id = req_dd_task.task_id;
 			new_dd_task->release_time = xTaskGetTickCount();
-			new_dd_task->absolute_deadline = req_dd_task->release_time + req_dd_task->absolute_deadline;
+			new_dd_task->absolute_deadline = req_dd_task.release_time + req_dd_task.absolute_deadline;
 			new_dd_task->completion_time = 0;
 			printf("Task %lu released at %lu", new_dd_task->task_id, new_dd_task->release_time);
 			//implement these
