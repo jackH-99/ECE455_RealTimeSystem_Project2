@@ -209,7 +209,6 @@ uint32_t get_overdue_dd_task_list(void);
 uint32_t get_completed_dd_task_list(void);
 
 void check_overdue_tasks(uint32_t currentTime);
-void assign_priorities();
 void move_to_completed(uint32_t the_task_id);
 void insert_sorted(dd_task *new_task);
 
@@ -262,19 +261,19 @@ int main(void)
 
 	xTaskCreate(xMonitor_Task, "MT",
 							   128,
-							   NULL, MAX_USER_TASK_PRIORITY,
+							   NULL, 2,
 							   &xMonitorHandle);
 
 	xTaskCreate(xDeadline_Driven_Task_Generator, "DDTG",
 							   256,
 							   NULL,
-							   MAX_USER_TASK_PRIORITY,
+							   2,
 							   &xDDTGHandle);
 
 	printf("Free heap before WLs: %u\n" , xPortGetFreeHeapSize());
-	xTaskCreate(xWorkloadTask_3, "WLT3", 128, NULL, tskIDLE_PRIORITY, &xWT3Handle);
-	xTaskCreate(xWorkloadTask_2, "WLT2", 128, NULL, tskIDLE_PRIORITY, &xWT2Handle);
-	xTaskCreate(xWorkloadTask_1, "WLT1", 128, NULL, tskIDLE_PRIORITY, &xWT1Handle);
+	xTaskCreate(xWorkloadTask_3, "WLT3", 128, NULL, 3, &xWT3Handle);
+	xTaskCreate(xWorkloadTask_2, "WLT2", 128, NULL, 3, &xWT2Handle);
+	xTaskCreate(xWorkloadTask_1, "WLT1", 128, NULL, 3, &xWT1Handle);
 
 
 
@@ -300,19 +299,17 @@ void xDDS_Task(void *pvParameters)
 			new_dd_task->release_time = xTaskGetTickCount();
 			new_dd_task->absolute_deadline = req_dd_task.release_time + req_dd_task.absolute_deadline;
 			new_dd_task->completion_time = 0;
-			printf("Task %lu released at %lu", new_dd_task->task_id, new_dd_task->release_time);
+			printf("Task %d released at %d", (int)new_dd_task->task_id, (int)new_dd_task->release_time);
 			insert_sorted(new_dd_task); // implemented
-			assign_priorities(); //implemented
 
 		}
 		uint32_t completed_id;
 		if (xQueueReceive(xCompleteQueue, &completed_id, 0) == pdPASS)
 		{
 			uint32_t completed_time = xTaskGetTickCount();
-			printf("Task %lu completed at %lu", completed_id, completed_time);
+			printf("Task %u completed at %u", (unsigned int)completed_id, (unsigned int)completed_time);
 			//move to completed finds the id and sets the completion time
 			move_to_completed(completed_id);
-			assign_priorities();
 		}
 
 		// check_overdue_tasks();
@@ -362,35 +359,38 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 {
 	(void)pvParameters;
 
-	TickType_t lastWake1 = xTaskGetTickCount();
-	TickType_t lastWake2 = xTaskGetTickCount();
-	TickType_t lastWake3 = xTaskGetTickCount();
+	TickType_t lastWake = xTaskGetTickCount();
+	const TickType_t baseTick = pdMS_TO_TICKS(50);
+	TickType_t acc1 = 0, acc2 = 0, acc3 = 0;
 
 	while(1)
 	{
 
-		TickType_t now = xTaskGetTickCount();
+		vTaskDelayUntil(&lastWake, baseTick);
 
-		if (now - lastWake1 >= pdMS_TO_TICKS(500)){
+		acc1 += baseTick;
+		acc2 += baseTick;
+		acc3 += baseTick;
 
-			release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(95));
-			lastWake1 += pdMS_TO_TICKS(500);
+		if (acc1 >= pdMS_TO_TICKS(500)){
+
+		acc1 = 0;
+		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(95));
 		}
-		if (now - lastWake2 >= pdMS_TO_TICKS(500))
+
+
+		if (acc2 >= pdMS_TO_TICKS(500)){
+
+		acc2 = 0;
+		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(150));
+		}
+		if (acc3 >= pdMS_TO_TICKS(750))
 		{
-
-
-			release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(150));
-			lastWake2 += pdMS_TO_TICKS(500);
-		}
-		if (now - lastWake3 >= pdMS_TO_TICKS(750))
-		{
-
-			release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(250));
-			lastWake3 += pdMS_TO_TICKS(750);
+		acc3 = 0;
+		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(250));
 		}
 
-		vTaskDelay(1);
+		vTaskDelay(10);
 	}
 
 }
@@ -406,6 +406,7 @@ void xWorkloadTask_1(void *pvParameters)
 	uint32_t id = 1;
 	for (;;)
 	{
+	printf("On Notify Take on WL1");
 	ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 	TickType_t start = xTaskGetTickCount();
 	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95)){
@@ -517,18 +518,6 @@ void move_to_completed(uint32_t the_task_id)
 	}
 }
 
-void assign_priorities()
-{
-	dd_task_node *curr = active_list;
-	int prio = MAX_USER_TASK_PRIORITY - 1;
-
-	while (curr != NULL)
-	{
-		vTaskPrioritySet(curr->task->t_handle, prio);
-		prio--;
-		curr = curr->next;
-	}
-}
 
 void check_overdue_tasks(uint32_t currentTime)
 {
