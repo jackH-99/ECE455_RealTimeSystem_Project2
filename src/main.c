@@ -146,6 +146,7 @@ functionality.
 #include "../FreeRTOS_Source/include/task.h"
 #include "../FreeRTOS_Source/include/timers.h"
 #include <inttypes.h>
+#include<stdbool.h>
 
 
 
@@ -171,7 +172,7 @@ typedef struct dd_task
 //(TASK LIST) called node instead of list
 typedef struct dd_task_node
 {
-	dd_task *task;
+	dd_task task;
 	struct dd_task_node *next;
 } dd_task_node;
 
@@ -209,8 +210,8 @@ uint32_t get_overdue_dd_task_list(void);
 uint32_t get_completed_dd_task_list(void);
 
 void check_overdue_tasks(uint32_t currentTime);
-void move_to_completed(uint32_t the_task_id);
-void insert_sorted(dd_task *new_task);
+bool move_to_completed(uint32_t the_task_id);
+void insert_sorted(dd_task new_task);
 
 void xWorkloadTask_1(void *pvParameters);
 void xWorkloadTask_2(void *pvParameters);
@@ -293,13 +294,13 @@ void xDDS_Task(void *pvParameters)
 		dd_task req_dd_task;
 		if (xQueueReceive(xReleaseQueue, &req_dd_task, 0) == pdPASS)
 		{
-			dd_task *new_dd_task = pvPortMalloc(sizeof(dd_task));
-			new_dd_task->t_handle = req_dd_task.t_handle;
-			new_dd_task->task_id = req_dd_task.task_id;
-			new_dd_task->release_time = xTaskGetTickCount();
-			new_dd_task->absolute_deadline = req_dd_task.release_time + req_dd_task.absolute_deadline;
-			new_dd_task->completion_time = 0;
-			printf("Task %d released at %d \n", (int)new_dd_task->task_id, (int)new_dd_task->release_time);
+			dd_task new_dd_task;
+			new_dd_task.t_handle = req_dd_task.t_handle;
+			new_dd_task.task_id = req_dd_task.task_id;
+			new_dd_task.release_time = xTaskGetTickCount();
+			new_dd_task.absolute_deadline = req_dd_task.release_time + req_dd_task.absolute_deadline;
+			new_dd_task.completion_time = 0;
+			printf("Task %d released at %d \n", (int)new_dd_task.task_id, (int)new_dd_task.release_time);
 			insert_sorted(new_dd_task); // implemented
 
 		}
@@ -307,8 +308,18 @@ void xDDS_Task(void *pvParameters)
 		if (xQueueReceive(xCompleteQueue, &completed_id, 0) == pdPASS)
 		{
 			uint32_t completion_time = xTaskGetTickCount();
-			move_to_completed(completed_id);
-			printf("task id: %d, completion time: %d\n", (int)completed_id, (int)completion_time);
+
+			if (move_to_completed(completed_id))
+			{
+				printf("Task %d completed at %d\n",
+										(int)completed_id, (int)completion_time);
+			}
+			else
+			{
+				//printf("Task %d completed at %d\n",
+									//	(int)completed_id, (int)completion_time);
+			}
+			//printf("task id: %d, completion time: %d\n", (int)completed_id, (int)completion_time);
 
 
 		}
@@ -347,7 +358,7 @@ void xDDS_Task(void *pvParameters)
 		dd_task_node *next = active_list;
 		if (next!=NULL)
 		{
-			xTaskNotifyGive(next->task->t_handle);
+			xTaskNotifyGive(next->task.t_handle);
 		}
 
 		vTaskDelay(10);
@@ -376,19 +387,19 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 		{
 		acc1 = 0;
 		firstTime1 = 0;
-		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(95));
+		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500));
 		}
 		if (acc2 >= pdMS_TO_TICKS(500) || firstTime2 == 1)
 		{
 		firstTime2 = 0;
 		acc2 = 0;
-		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(150));
+		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500));
 		}
 		if (acc3 >= pdMS_TO_TICKS(750) || firstTime3 == 1)
 		{
 		acc3 = 0;
 		firstTime3 = 0;
-		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(250));
+		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(750));
 		}
 
 	}
@@ -460,14 +471,14 @@ void release_dd_task(TaskHandle_t t_handle,
 	xQueueSend(xReleaseQueue, &new_task, pdMS_TO_TICKS(100));
 }
 
-void insert_sorted(dd_task *new_task)
+void insert_sorted(dd_task new_task)
 {
 	dd_task_node *node = pvPortMalloc(sizeof(dd_task_node));
 	node->task = new_task;
 	node->next = NULL;
 
 	if (active_list == NULL ||
-			new_task->absolute_deadline < active_list->task->absolute_deadline)
+			new_task.absolute_deadline < active_list->task.absolute_deadline)
 	{
 		node->next = active_list;
 		active_list = node;
@@ -475,7 +486,7 @@ void insert_sorted(dd_task *new_task)
 	}
 
 	dd_task_node *curr = active_list;
-	while (curr->next != NULL && curr->next->task->absolute_deadline < new_task->absolute_deadline)
+	while (curr->next != NULL && curr->next->task.absolute_deadline < new_task.absolute_deadline)
 	{
 		curr = curr->next;
 	}
@@ -484,15 +495,16 @@ void insert_sorted(dd_task *new_task)
 	curr->next = node;
 }
 
-void move_to_completed(uint32_t the_task_id)
+bool move_to_completed(uint32_t the_task_id)
 {
 	dd_task_node *prev = NULL;
 	dd_task_node *curr = active_list;
 
 	while (curr != NULL)
 	{
-		if (the_task_id == curr->task->task_id)
+		if (the_task_id == curr->task.task_id)
 		{
+
 			if (prev==NULL)
 			{
 				active_list = curr->next;
@@ -501,20 +513,16 @@ void move_to_completed(uint32_t the_task_id)
 			{
 				prev->next = curr->next;
 			}
-			curr->task->completion_time = xTaskGetTickCount();
+			curr->task.completion_time = xTaskGetTickCount();
 			curr->next = completed_list;
 			completed_list = curr;
-
-			//update the completion time
-			//and move to front of completed list
-			//latest completion time first in the
-			//linked list
-			return;
+			return true;
 
 		}
 		prev = curr;
 		curr = curr->next;
 	}
+	return false;
 }
 
 
@@ -525,7 +533,7 @@ void check_overdue_tasks(uint32_t currentTime)
 
 	while (curr!= NULL)
 	{
-		if (curr->task->absolute_deadline < currentTime)
+		if (curr->task.absolute_deadline < currentTime)
 		{
 
 			dd_task_node *overdue = curr;
@@ -601,8 +609,8 @@ void xMonitor_Task(void *pvParameters)
 	unsigned int num_overdue;
 	unsigned int num_completed;
 	num_active = (unsigned int)get_active_task_list();
-	num_completed = (unsigned int)get_overdue_task_list();
-	num_overdue = (unsigned int)get_completed_task_list();
+	num_completed = (unsigned int)get_completed_task_list();
+	num_overdue = 	(unsigned int)get_overdue_task_list();
 
 
 	printf("Active: %u, Completed: %u, Overdue: %u\n",
