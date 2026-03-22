@@ -299,17 +299,18 @@ void xDDS_Task(void *pvParameters)
 			new_dd_task->release_time = xTaskGetTickCount();
 			new_dd_task->absolute_deadline = req_dd_task.release_time + req_dd_task.absolute_deadline;
 			new_dd_task->completion_time = 0;
-			printf("Task %d released at %d", (int)new_dd_task->task_id, (int)new_dd_task->release_time);
+			printf("Task %d released at %d \n", (int)new_dd_task->task_id, (int)new_dd_task->release_time);
 			insert_sorted(new_dd_task); // implemented
 
 		}
 		uint32_t completed_id;
 		if (xQueueReceive(xCompleteQueue, &completed_id, 0) == pdPASS)
 		{
-			uint32_t completed_time = xTaskGetTickCount();
-			printf("Task %u completed at %u", (unsigned int)completed_id, (unsigned int)completed_time);
-			//move to completed finds the id and sets the completion time
+			uint32_t completion_time = xTaskGetTickCount();
 			move_to_completed(completed_id);
+			printf("task id: %d, completion time: %d\n", (int)completed_id, (int)completion_time);
+
+
 		}
 
 		// check_overdue_tasks();
@@ -358,39 +359,38 @@ void xDDS_Task(void *pvParameters)
 void xDeadline_Driven_Task_Generator(void *pvParameters)
 {
 	(void)pvParameters;
-
 	TickType_t lastWake = xTaskGetTickCount();
 	const TickType_t baseTick = pdMS_TO_TICKS(50);
 	TickType_t acc1 = 0, acc2 = 0, acc3 = 0;
+	uint32_t firstTime1 = 1, firstTime2 = 1, firstTime3 = 1;
 
 	while(1)
 	{
 
 		vTaskDelayUntil(&lastWake, baseTick);
-
 		acc1 += baseTick;
 		acc2 += baseTick;
 		acc3 += baseTick;
 
-		if (acc1 >= pdMS_TO_TICKS(500)){
-
+		if (acc1 >= pdMS_TO_TICKS(500) || firstTime1 == 1)
+		{
 		acc1 = 0;
+		firstTime1 = 0;
 		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(95));
 		}
-
-
-		if (acc2 >= pdMS_TO_TICKS(500)){
-
+		if (acc2 >= pdMS_TO_TICKS(500) || firstTime2 == 1)
+		{
+		firstTime2 = 0;
 		acc2 = 0;
 		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(150));
 		}
-		if (acc3 >= pdMS_TO_TICKS(750))
+		if (acc3 >= pdMS_TO_TICKS(750) || firstTime3 == 1)
 		{
 		acc3 = 0;
+		firstTime3 = 0;
 		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(250));
 		}
 
-		vTaskDelay(10);
 	}
 
 }
@@ -406,7 +406,6 @@ void xWorkloadTask_1(void *pvParameters)
 	uint32_t id = 1;
 	for (;;)
 	{
-	printf("On Notify Take on WL1");
 	ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 	TickType_t start = xTaskGetTickCount();
 	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95)){
@@ -595,6 +594,7 @@ uint32_t get_active_task_list(void)
 
 void xMonitor_Task(void *pvParameters)
 {
+	for(;;){
 	vTaskDelay(pdMS_TO_TICKS(1500)); // One HyperPeriod
 	(void)pvParameters;
 	unsigned int num_active;
@@ -607,7 +607,7 @@ void xMonitor_Task(void *pvParameters)
 
 	printf("Active: %u, Completed: %u, Overdue: %u\n",
 			num_active, num_completed, num_overdue);
-
+	}
 
 }
 void vApplicationMallocFailedHook( void )
