@@ -292,7 +292,7 @@ void xDDS_Task(void *pvParameters)
 	{
 
 		dd_task req_dd_task;
-		if (xQueueReceive(xReleaseQueue, &req_dd_task, 0) == pdPASS)
+		while (xQueueReceive(xReleaseQueue, &req_dd_task, 0) == pdPASS)
 		{
 			dd_task new_dd_task;
 			new_dd_task.t_handle = req_dd_task.t_handle;
@@ -305,38 +305,29 @@ void xDDS_Task(void *pvParameters)
 
 		}
 
-		uint32_t currentTime = (uint32_t)xTaskGetTickCount();
-		check_overdue_tasks(currentTime);
+
+		check_overdue_tasks((uint32_t)xTaskGetTickCount());
 
 		// run the task
 
-		dd_task_node *next = active_list;
-		if (next!=NULL){
-			vTaskResume(next->task.t_handle);
-		}
-
-
-		// Task is started.
-		TaskHandle_t completed_handle;
-		if (xQueueReceive(xCompleteQueue, &completed_handle, portMAX_DELAY) == pdPASS)
+		if (active_list != NULL)
 		{
-			uint32_t completion_time = xTaskGetTickCount();
+			TaskHandle_t expected = active_list->task.t_handle;
+			vTaskResume(expected);
 
-			if (move_to_completed(completed_handle))
+			TaskHandle_t completed_handle;
+			if (xQueueReceive(xCompleteQueue, &completed_handle, pdMS_TO_TICKS(1)) == pdPASS);
 			{
-				printf("Task handle %d completed at %d\n",
-										(int)completed_handle, (int)completion_time);
-			}
-			else
-			{
-				printf("Completion handle %d not found in active list at %d\n",
-										(int)completed_handle, (int)completion_time);
+				if (!move_to_completed(completed_handle))
+				{
+					printf("Late Completion ignored h=%d\n", (int)completed_handle);
+				}
+				else
+				{
+					printf("Task %d completed at %d \n", (int)active_list->task.task_id, (int)xTaskGetTickCount());
+				}
 			}
 		}
-
-		// check_overdue_tasks();
-
-
 
 		dd_task_list_req req;
 		if (xQueueReceive(xReqQueue, &req, 0) == pdPASS)
