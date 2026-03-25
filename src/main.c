@@ -210,7 +210,7 @@ uint32_t get_overdue_dd_task_list(void);
 uint32_t get_completed_dd_task_list(void);
 
 void check_overdue_tasks(uint32_t currentTime);
-bool move_to_completed(uint32_t the_task_id);
+bool move_to_completed(TaskHandle_t completed_handle);
 void insert_sorted(dd_task new_task);
 
 void xWorkloadTask_1(void *pvParameters);
@@ -250,7 +250,7 @@ int main(void)
 	xRespQueue = xQueueCreate(5, sizeof(uint32_t));
 	xReqQueue = xQueueCreate(5, sizeof(dd_task_list_req));
 	xReleaseQueue = xQueueCreate(10, sizeof(dd_task));
-	xCompleteQueue = xQueueCreate(10, sizeof(uint32_t));
+	xCompleteQueue = xQueueCreate(10, sizeof(TaskHandle_t));
 
 
 	xTaskCreate(xDDS_Task,
@@ -305,37 +305,38 @@ void xDDS_Task(void *pvParameters)
 
 		}
 
+		uint32_t currentTime = (uint32_t)xTaskGetTickCount();
+		check_overdue_tasks(currentTime);
+
 		// run the task
 
-		dd_node *next = active_list;
+		dd_task_node *next = active_list;
+		if (next!=NULL){
+			vTaskResume(next->task.t_handle);
+		}
 
-		vTaskResume(next->task.t_handle);
 
 		// Task is started.
-		uint32_t completed_id;
-		if (xQueueReceive(xCompleteQueue, &completed_id, 0) == pdPASS)
+		TaskHandle_t completed_handle;
+		if (xQueueReceive(xCompleteQueue, &completed_handle, portMAX_DELAY) == pdPASS)
 		{
 			uint32_t completion_time = xTaskGetTickCount();
 
-			if (move_to_completed(completed_id))
+			if (move_to_completed(completed_handle))
 			{
-				printf("Task %d completed at %d\n",
-										(int)completed_id, (int)completion_time);
+				printf("Task handle %d completed at %d\n",
+										(int)completed_handle, (int)completion_time);
 			}
 			else
 			{
-				//printf("Task %d completed at %d\n",
-									//	(int)completed_id, (int)completion_time);
+				printf("Completion handle %d not found in active list at %d\n",
+										(int)completed_handle, (int)completion_time);
 			}
-			//printf("task id: %d, completion time: %d\n", (int)completed_id, (int)completion_time);
-
-
 		}
 
 		// check_overdue_tasks();
 
-		uint32_t currentTime = (uint32_t)xTaskGetTickCount();
-		check_overdue_tasks(currentTime);
+
 
 		dd_task_list_req req;
 		if (xQueueReceive(xReqQueue, &req, 0) == pdPASS)
@@ -363,11 +364,7 @@ void xDDS_Task(void *pvParameters)
 			}
 			xQueueSend(xRespQueue, &dd_count_msg, portMAX_DELAY);
 		}
-		dd_task_node *next = active_list;
-		if (next!=NULL)
-		{
-			xTaskNotifyGive(next->task.t_handle);
-		}
+
 
 		vTaskDelay(10);
 	}
@@ -503,14 +500,14 @@ void insert_sorted(dd_task new_task)
 	curr->next = node;
 }
 
-bool move_to_completed(uint32_t the_task_id)
+bool move_to_completed(TaskHandle_t completed_handle)
 {
 	dd_task_node *prev = NULL;
 	dd_task_node *curr = active_list;
 
 	while (curr != NULL)
 	{
-		if (the_task_id == curr->task.task_id)
+		if (completed_handle == curr->task.t_handle)
 		{
 
 			if (prev==NULL)
@@ -570,9 +567,11 @@ void check_overdue_tasks(uint32_t currentTime)
 	}
 }
 
-void complete_dd_task(uint32_t id)
+void complete_dd_task(uint32_t task_id)
 {
-	xQueueSend(xCompleteQueue, &id, 0); // wait 0 seconds
+	(void) task_id;
+	TaskHandle_t completed_handle = xTaskGetCurrentTaskHandle();
+	xQueueSend(xCompleteQueue, &completed_handle, 0); // wait 0 seconds
 }
 
 uint32_t get_completed_task_list(void)
