@@ -304,6 +304,14 @@ void xDDS_Task(void *pvParameters)
 			insert_sorted(new_dd_task); // implemented
 
 		}
+
+		// run the task
+
+		dd_node *next = active_list;
+
+		vTaskResume(next->task.t_handle);
+
+		// Task is started.
 		uint32_t completed_id;
 		if (xQueueReceive(xCompleteQueue, &completed_id, 0) == pdPASS)
 		{
@@ -370,37 +378,38 @@ void xDDS_Task(void *pvParameters)
 void xDeadline_Driven_Task_Generator(void *pvParameters)
 {
 	(void)pvParameters;
-	TickType_t lastWake = xTaskGetTickCount();
-	const TickType_t baseTick = pdMS_TO_TICKS(50);
-	TickType_t acc1 = 0, acc2 = 0, acc3 = 0;
+
+	TickType_t next1 = xTaskGetTickCount() + pdMS_TO_TICKS(500);
+	TickType_t next2 = xTaskGetTickCount() + pdMS_TO_TICKS(500);
+	TickType_t next3 = xTaskGetTickCount() + pdMS_TO_TICKS(750);
 	uint32_t firstTime1 = 1, firstTime2 = 1, firstTime3 = 1;
 
 	while(1)
 	{
+		TickType_t now = xTaskGetTickCount();
 
-		vTaskDelayUntil(&lastWake, baseTick);
-		acc1 += baseTick;
-		acc2 += baseTick;
-		acc3 += baseTick;
 
-		if (acc1 >= pdMS_TO_TICKS(500) || firstTime1 == 1)
+
+		if (now >= next1 || firstTime1 == 1)
 		{
-		acc1 = 0;
+		next1 += pdMS_TO_TICKS(500);
 		firstTime1 = 0;
 		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500));
 		}
-		if (acc2 >= pdMS_TO_TICKS(500) || firstTime2 == 1)
+		if (now >= next2 || firstTime2 == 1)
 		{
 		firstTime2 = 0;
-		acc2 = 0;
+		next2 += pdMS_TO_TICKS(500);
 		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500));
 		}
-		if (acc3 >= pdMS_TO_TICKS(750) || firstTime3 == 1)
+		if (now >= next3 || firstTime3 == 1)
 		{
-		acc3 = 0;
+		next3 += pdMS_TO_TICKS(750);
 		firstTime3 = 0;
 		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(750));
 		}
+
+		vTaskDelay(10);
 
 	}
 
@@ -417,7 +426,7 @@ void xWorkloadTask_1(void *pvParameters)
 	uint32_t id = 1;
 	for (;;)
 	{
-	ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+	vTaskSuspend(NULL);
 	TickType_t start = xTaskGetTickCount();
 	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95)){
 		//nothing
@@ -433,7 +442,7 @@ void xWorkloadTask_2(void *pvParameters)
 	uint32_t id = 2;
 	for (;;)
 	{
-	ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+	vTaskSuspend(NULL);
 	uint32_t start = xTaskGetTickCount();
 	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(150));
 	complete_dd_task(id);
@@ -445,8 +454,7 @@ void xWorkloadTask_3(void *pvParameters)
 	uint32_t id = 3;
 	for (;;)
 	{
-	ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
+	vTaskSuspend(NULL);
 	uint32_t start = xTaskGetTickCount();
 	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(250));
 	complete_dd_task(id);
