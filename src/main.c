@@ -201,7 +201,7 @@ void release_dd_task(TaskHandle_t t_handle,
 					uint32_t task_id,
 					uint32_t absolute_deadline);
 
-void complete_dd_task(uint32_t task_id);
+void complete_dd_task(TaskHandle_t t_handle);
 
 void xMonitor_Task(void *pvParameters);
 
@@ -212,6 +212,8 @@ uint32_t get_completed_dd_task_list(void);
 void check_overdue_tasks(uint32_t currentTime);
 bool move_to_completed(TaskHandle_t completed_handle);
 void insert_sorted(dd_task new_task);
+bool handle_exists_in_active_list(TaskHandle_t handle);
+void push_new_node_to_overdue(dd_task_node *node);
 
 void xWorkloadTask_1(void *pvParameters);
 void xWorkloadTask_2(void *pvParameters);
@@ -313,10 +315,11 @@ void xDDS_Task(void *pvParameters)
 		if (active_list != NULL)
 		{
 			TaskHandle_t expected = active_list->task.t_handle;
+			uint32_t expected_task_id = active_list->task.task_id;
 			vTaskResume(expected);
 
 			TaskHandle_t completed_handle;
-			if (xQueueReceive(xCompleteQueue, &completed_handle, pdMS_TO_TICKS(1)) == pdPASS);
+			if (xQueueReceive(xCompleteQueue, &completed_handle, pdMS_TO_TICKS(1)) == pdPASS)
 			{
 				if (!move_to_completed(completed_handle))
 				{
@@ -324,7 +327,7 @@ void xDDS_Task(void *pvParameters)
 				}
 				else
 				{
-					printf("Task %d completed at %d \n", (int)active_list->task.task_id, (int)xTaskGetTickCount());
+					printf("Task %d completed at %d \n", (int)expected_task_id, (int)xTaskGetTickCount());
 				}
 			}
 		}
@@ -474,40 +477,57 @@ void insert_sorted(dd_task new_task)
 	node->task = new_task;
 	node->next = NULL;
 
-	if (active_list == NULL ||
-			new_task.absolute_deadline < active_list->task.absolute_deadline)
+	if (handle_exists_in_active_list(new_task.t_handle))
 	{
-		if (active_list->task.t_handle != node->task.t_handle)
-		{
-			node->next = active_list;
-			active_list = node;
-			return;
-		}
-		else
-		{
-			node->task.completion_time = xTaskGetTickCount();
-			move_to_overdue(node);
-			printf("Duplicate task handle detected, not inserting into active list\n");
-			return;
-		}
-
+		node->task.completion_time = xTaskGetTickCount();
+		push_new_node_to_overdue(node);
+		printf("Duplicate task handle detected, not inserting into active list\n");
+		return;
 	}
 
+	// If list is empty, insert as head
+	if (active_list == NULL)
+	{
+		active_list = node;
+		return;
+	}
+
+	if (new_task.absolute_deadline < active_list->task.absolute_deadline)
+	{
+		node->next = active_list;
+		active_list = node;
+		return;
+	}
+
+	// Search for insertion point.
 	dd_task_node *curr = active_list;
 	while (curr->next != NULL && curr->next->task.absolute_deadline < new_task.absolute_deadline)
 	{
-		if (curr->next->task.t_handle == node->task.t_handle)
-		{
-			node->task.completion_time = xTaskGetTickCount();
-			move_to_overdue(curr->next);
-			printf("Duplicate task handle detected, not inserting into active list\n");
-			return;
-		}
 		curr = curr->next;
 	}
 
 	node->next = curr->next;
 	curr->next = node;
+}
+
+bool handle_exists_in_active_list(TaskHandle_t handle)
+{
+	dd_task_node *curr = active_list;
+	while (curr != NULL)
+	{
+		if (curr->task.t_handle == handle)
+		{
+			return true;
+		}
+		curr = curr->next;
+	}
+	return false;
+}
+
+void push_new_node_to_overdue(dd_task_node *node)
+{
+	node->next = overdue_list;
+	overdue_list = node;
 }
 
 bool move_to_completed(TaskHandle_t completed_handle)
