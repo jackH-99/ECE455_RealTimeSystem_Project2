@@ -164,9 +164,12 @@ typedef struct dd_task
 	TaskHandle_t t_handle;
 	task_type type;
 	uint32_t task_id;
+	uint32_t work_id;
 	uint32_t release_time;
 	uint32_t absolute_deadline;
 	uint32_t completion_time;
+	SemaphoreHandle_t sem;
+	uint32_t instance_id;
 } dd_task;
 
 //(TASK LIST) called node instead of list
@@ -199,33 +202,64 @@ typedef enum
 void release_dd_task(TaskHandle_t t_handle,
 					task_type type,
 					uint32_t task_id,
-					uint32_t absolute_deadline);
+					uint32_t absolute_deadline,
+					SemaphoreHandle_t sem,
+					uint32_t instance_id);
 
-void complete_dd_task(TaskHandle_t t_handle);
+void complete_dd_task(uint32_t instance_id);
+void adjust_priorities(void);
 
 void xMonitor_Task(void *pvParameters);
 
 uint32_t get_active_task_list(void);
-uint32_t get_overdue_dd_task_list(void);
-uint32_t get_completed_dd_task_list(void);
+uint32_t get_overdue_task_list(void);
+uint32_t get_completed_task_list(void);
 
 void check_overdue_tasks(uint32_t currentTime);
-bool move_to_completed(TaskHandle_t completed_handle);
+bool move_to_completed(uint32_t instance_id);
 void insert_sorted(dd_task new_task);
-bool handle_exists_in_active_list(TaskHandle_t handle);
-void push_new_node_to_overdue(dd_task_node *node);
+void dispatch_head_task_if_idle(void);
 
 void xWorkloadTask_1(void *pvParameters);
 void xWorkloadTask_2(void *pvParameters);
 void xWorkloadTask_3(void *pvParameters);
 
+SemaphoreHandle_t worker1_sem;
+SemaphoreHandle_t worker2_sem;
+SemaphoreHandle_t worker3_sem;
+QueueHandle_t worker1_instance_q;
+QueueHandle_t worker2_instance_q;
+QueueHandle_t worker3_instance_q;
+
 void xDeadline_Driven_Task_Generator(void *pvParameters);
 void xDDS_Task(void *pvParameters);
 
+/*
 QueueHandle_t xRespQueue = NULL;
 QueueHandle_t xReqQueue = NULL;
 QueueHandle_t xCompleteQueue = NULL;
 QueueHandle_t xReleaseQueue = NULL;
+*/
+
+
+QueueHandle_t xCommandQueue = NULL;
+QueueHandle_t xOverdueQueue = NULL;
+QueueHandle_t xActiveQueue = NULL;
+QueueHandle_t xCompleteQueue = NULL;
+
+typedef enum {
+	CMD_RELEASE,
+	CMD_COMPLETE,
+	CMD_MONITOR
+} dds_cmd_type;
+
+typedef struct {
+	dds_cmd_type type;
+	dd_task task;
+	uint32_t value;
+	dd_task_list_req req;
+} command;
+
 
 TaskHandle_t xWT1Handle;
 TaskHandle_t xWT2Handle;
@@ -235,6 +269,9 @@ TaskHandle_t xWT3Handle;
 TaskHandle_t xDDSHandle;
 TaskHandle_t xMonitorHandle;
 TaskHandle_t xDDTGHandle;
+
+static bool g_dispatch_in_flight = false;
+static uint32_t g_running_instance_id = 0;
 
 #define MAX_USER_TASK_PRIORITY (configMAX_PRIORITIES - 1)
 
@@ -249,10 +286,21 @@ int main(void)
 
 
 
+	/*
 	xRespQueue = xQueueCreate(5, sizeof(uint32_t));
 	xReqQueue = xQueueCreate(5, sizeof(dd_task_list_req));
 	xReleaseQueue = xQueueCreate(10, sizeof(dd_task));
 	xCompleteQueue = xQueueCreate(10, sizeof(TaskHandle_t));
+	*/
+
+	xCommandQueue = xQueueCreate(5, sizeof(command));
+	xOverdueQueue = xQueueCreate(5, sizeof(uint32_t));
+	xActiveQueue = xQueueCreate(5, sizeof(uint32_t));
+	xCompleteQueue = xQueueCreate(5, sizeof(uint32_t));
+	worker1_instance_q = xQueueCreate(5, sizeof(uint32_t));
+	worker2_instance_q = xQueueCreate(5, sizeof(uint32_t));
+	worker3_instance_q = xQueueCreate(5, sizeof(uint32_t));
+
 
 
 	xTaskCreate(xDDS_Task,
@@ -274,9 +322,14 @@ int main(void)
 							   &xDDTGHandle);
 
 	printf("Free heap before WLs: %u\n" , xPortGetFreeHeapSize());
-	xTaskCreate(xWorkloadTask_3, "WLT3", 128, NULL, 3, &xWT3Handle);
-	xTaskCreate(xWorkloadTask_2, "WLT2", 128, NULL, 3, &xWT2Handle);
-	xTaskCreate(xWorkloadTask_1, "WLT1", 128, NULL, 3, &xWT1Handle);
+	xTaskCreate(xWorkloadTask_3, "WLT3", 128, NULL, 2, &xWT3Handle);
+	xTaskCreate(xWorkloadTask_2, "WLT2", 128, NULL, 2, &xWT2Handle);
+	xTaskCreate(xWorkloadTask_1, "WLT1", 128, NULL, 2, &xWT1Handle);
+
+	worker1_sem = xSemaphoreCreateBinary();
+	worker2_sem = xSemaphoreCreateBinary();
+	worker3_sem = xSemaphoreCreateBinary();
+
 
 
 
@@ -287,83 +340,152 @@ int main(void)
 
 /*-----------------------------------------------------------*/
 
+void dispatch_head_task_if_idle(void)
+{
+	if (g_dispatch_in_flight || active_list == NULL)
+	{
+		return;
+	}
+
+	uint32_t instance_id = active_list->task.instance_id;
+	BaseType_t queued = pdFAIL;
+
+	if (active_list->task.task_id == 1)
+	{
+		queued = xQueueSend(worker1_instance_q, &instance_id, 0);
+		if (queued == pdPASS)
+		{
+			xSemaphoreGive(worker1_sem);
+		}
+	}
+	else if (active_list->task.task_id == 2)
+	{
+		queued = xQueueSend(worker2_instance_q, &instance_id, 0);
+		if (queued == pdPASS)
+		{
+			xSemaphoreGive(worker2_sem);
+		}
+	}
+	else if (active_list->task.task_id == 3)
+	{
+		queued = xQueueSend(worker3_instance_q, &instance_id, 0);
+		if (queued == pdPASS)
+		{
+			xSemaphoreGive(worker3_sem);
+		}
+	}
+
+	if (queued == pdPASS)
+	{
+		g_dispatch_in_flight = true;
+		g_running_instance_id = instance_id;
+	}
+}
+
+/*-----------------------------------------------------------*/
+
 void xDDS_Task(void *pvParameters)
 {
 	(void)pvParameters;
 	while(1)
 	{
 
-		dd_task req_dd_task;
-		while (xQueueReceive(xReleaseQueue, &req_dd_task, 0) == pdPASS)
+		command msg;
+		if (xQueueReceive(xCommandQueue, &msg, portMAX_DELAY))
 		{
-			dd_task new_dd_task;
-			new_dd_task.t_handle = req_dd_task.t_handle;
-			new_dd_task.task_id = req_dd_task.task_id;
-			new_dd_task.release_time = xTaskGetTickCount();
-			new_dd_task.absolute_deadline = req_dd_task.release_time + req_dd_task.absolute_deadline;
-			new_dd_task.completion_time = 0;
-			printf("Task %d released at %d \n", (int)new_dd_task.task_id, (int)new_dd_task.release_time);
-			insert_sorted(new_dd_task); // implemented
+			switch(msg.type)
+			{
+				case CMD_RELEASE:
+				{
+					dd_task new_dd_task;
+					new_dd_task.t_handle = msg.task.t_handle;
+					new_dd_task.task_id = msg.task.task_id;
+					new_dd_task.release_time = xTaskGetTickCount();
+					new_dd_task.type = msg.task.type;
+					new_dd_task.absolute_deadline = new_dd_task.release_time + msg.task.absolute_deadline;
+					new_dd_task.completion_time = 0;
+					new_dd_task.sem = msg.task.sem;
+					new_dd_task.instance_id = msg.task.instance_id;
+					insert_sorted(new_dd_task);
+
+					adjust_priorities();
+					break;
+				}
+					
+				case CMD_COMPLETE:
+				{
+					uint32_t instance_id = msg.value;
+					if (instance_id == g_running_instance_id)
+					{
+						g_dispatch_in_flight = false;
+					}
+
+					if (!move_to_completed(instance_id))
+					{
+						printf("Completion ignored for some reason");
+						adjust_priorities();
+						break;
+					}
+					else
+					{
+						printf("Instance %d completed at %d \n", (int)instance_id, (int)xTaskGetTickCount());
+						adjust_priorities();
+						break;
+					}
+				}
+				case CMD_MONITOR:
+				{
+					dd_task_list_req req = msg.req;
+					uint32_t dd_count_msg = 0;
+
+					dd_task_node *curr = NULL;
+					if (req==GET_ACTIVE_LIST)
+					{
+						curr = active_list;
+						while (curr!=NULL)
+						{
+						dd_count_msg++;
+						curr = curr->next;
+						}
+						xQueueSend(xActiveQueue, &dd_count_msg, portMAX_DELAY);
+						break;
+
+					}
+					else if (req==GET_COMPLETED_LIST)
+					{
+						curr = completed_list;
+						while (curr!=NULL)
+						{
+						dd_count_msg++;
+						curr = curr->next;
+						}
+						xQueueSend(xCompleteQueue, &dd_count_msg, portMAX_DELAY);
+						break;
+					}
+					else if (req==GET_OVERDUE_LIST)
+					{
+						curr = overdue_list;
+						while (curr!=NULL)
+						{
+						dd_count_msg++;
+						curr = curr->next;
+						}
+						xQueueSend(xOverdueQueue, &dd_count_msg, portMAX_DELAY);
+						break;
+					}
+
+				}
+			}
 
 		}
-
-
 		check_overdue_tasks((uint32_t)xTaskGetTickCount());
-
-		// run the task
-
-		if (active_list != NULL)
-		{
-			TaskHandle_t expected = active_list->task.t_handle;
-			uint32_t expected_task_id = active_list->task.task_id;
-			vTaskResume(expected);
-
-			TaskHandle_t completed_handle;
-			if (xQueueReceive(xCompleteQueue, &completed_handle, pdMS_TO_TICKS(1)) == pdPASS)
-			{
-				if (!move_to_completed(completed_handle))
-				{
-					printf("Late Completion ignored h=%d\n", (int)completed_handle);
-				}
-				else
-				{
-					printf("Task %d completed at %d \n", (int)expected_task_id, (int)xTaskGetTickCount());
-				}
-			}
-		}
-
-		dd_task_list_req req;
-		if (xQueueReceive(xReqQueue, &req, 0) == pdPASS)
-		{
-			uint32_t dd_count_msg = 0;
-
-			dd_task_node *curr = NULL;
-			if (req==GET_ACTIVE_LIST)
-			{
-				curr = active_list;
-
-			}
-			else if (req==GET_COMPLETED_LIST)
-			{
-				curr = completed_list;
-			}
-			else if (req==GET_OVERDUE_LIST)
-			{
-				curr = overdue_list;
-			}
-			while (curr!=NULL)
-			{
-				dd_count_msg++;
-				curr = curr->next;
-			}
-			xQueueSend(xRespQueue, &dd_count_msg, portMAX_DELAY);
-		}
+		dispatch_head_task_if_idle();
 
 
-		vTaskDelay(10);
 	}
-
 }
+
+
 /*-----------------------------------------------------------*/
 
 void xDeadline_Driven_Task_Generator(void *pvParameters)
@@ -374,6 +496,7 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 	TickType_t next2 = xTaskGetTickCount() + pdMS_TO_TICKS(500);
 	TickType_t next3 = xTaskGetTickCount() + pdMS_TO_TICKS(750);
 	uint32_t firstTime1 = 1, firstTime2 = 1, firstTime3 = 1;
+	uint32_t next_instance_id = 1;
 
 	while(1)
 	{
@@ -385,19 +508,19 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 		{
 		next1 += pdMS_TO_TICKS(500);
 		firstTime1 = 0;
-		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500));
+		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++);
 		}
 		if (now >= next2 || firstTime2 == 1)
 		{
 		firstTime2 = 0;
 		next2 += pdMS_TO_TICKS(500);
-		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500));
+		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++);
 		}
 		if (now >= next3 || firstTime3 == 1)
 		{
 		next3 += pdMS_TO_TICKS(750);
 		firstTime3 = 0;
-		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(750));
+		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(750), worker3_sem, next_instance_id++);
 		}
 
 		vTaskDelay(10);
@@ -414,16 +537,15 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 // I think I have to use for loops
 void xWorkloadTask_1(void *pvParameters)
 {
-	TaskHandle_t t_handle = xTaskGetCurrentTaskHandle();
-	uint32_t id = 1;
+	uint32_t start;
+	uint32_t instance_id;
 	for (;;)
 	{
-	vTaskSuspend(NULL);
-	TickType_t start = xTaskGetTickCount();
-	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95)){
-		//nothing
-	}
-	complete_dd_task(t_handle); // NO
+		xSemaphoreTake(worker1_sem, portMAX_DELAY);
+		xQueueReceive(worker1_instance_q, &instance_id, portMAX_DELAY);
+		start = xTaskGetTickCount();
+		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95)){}
+		complete_dd_task(instance_id);
 	}
 }
 
@@ -431,25 +553,29 @@ void xWorkloadTask_1(void *pvParameters)
 
 void xWorkloadTask_2(void *pvParameters)
 {
-	TaskHandle_t t_handle = xTaskGetCurrentTaskHandle();
+	uint32_t start;
+	uint32_t instance_id;
 	for (;;)
 	{
-	vTaskSuspend(NULL);
-	uint32_t start = xTaskGetTickCount();
-	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(150));
-	complete_dd_task(t_handle);
+		xSemaphoreTake(worker2_sem, portMAX_DELAY);
+		xQueueReceive(worker2_instance_q, &instance_id, portMAX_DELAY);
+		start = xTaskGetTickCount();
+		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(150)){}
+		complete_dd_task(instance_id);
 	}
 }
 /*-----------------------------------------------------------*/
 void xWorkloadTask_3(void *pvParameters)
 {
-	TaskHandle_t t_handle = xTaskGetCurrentTaskHandle();
+	uint32_t start = 0;
+	uint32_t instance_id;
 	for (;;)
 	{
-	vTaskSuspend(NULL);
-	uint32_t start = xTaskGetTickCount();
-	while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(250));
-	complete_dd_task(t_handle);
+		xSemaphoreTake(worker3_sem, portMAX_DELAY);
+		xQueueReceive(worker3_instance_q, &instance_id, portMAX_DELAY);
+		start = xTaskGetTickCount();
+		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(250)){}
+		complete_dd_task(instance_id);
 	}
 }
 /*-----------------------------------------------------------*/
@@ -460,30 +586,28 @@ void xWorkloadTask_3(void *pvParameters)
 void release_dd_task(TaskHandle_t t_handle,
 					task_type type,
 					uint32_t task_id,
-					uint32_t absolute_deadline)
+					uint32_t absolute_deadline, SemaphoreHandle_t sem, uint32_t instance_id)
 {
-	dd_task new_task;
-	new_task.t_handle = t_handle;
-	new_task.type = PERIODIC;
-	new_task.task_id = task_id;
-	new_task.absolute_deadline = absolute_deadline;
-	// DDS assigns release time and completion time
-	xQueueSend(xReleaseQueue, &new_task, pdMS_TO_TICKS(100));
+	command msg;
+	msg.type = CMD_RELEASE;
+	msg.task.t_handle = t_handle;
+	msg.task.type = type;
+	msg.task.task_id = task_id;
+	msg.task.absolute_deadline = absolute_deadline;
+	msg.task.sem = sem;
+	msg.task.instance_id = instance_id;
+	msg.task.release_time = 0;
+	msg.task.completion_time = 0;
+
+	xQueueSend(xCommandQueue, &msg, 0);
 }
 
 void insert_sorted(dd_task new_task)
 {
+	// This function inserts a new task into the active list, sorted by absolute deadline
 	dd_task_node *node = pvPortMalloc(sizeof(dd_task_node));
 	node->task = new_task;
 	node->next = NULL;
-
-	if (handle_exists_in_active_list(new_task.t_handle))
-	{
-		node->task.completion_time = xTaskGetTickCount();
-		push_new_node_to_overdue(node);
-		printf("Duplicate task handle detected, not inserting into active list\n");
-		return;
-	}
 
 	// If list is empty, insert as head
 	if (active_list == NULL)
@@ -510,34 +634,34 @@ void insert_sorted(dd_task new_task)
 	curr->next = node;
 }
 
-bool handle_exists_in_active_list(TaskHandle_t handle)
+void adjust_priorities()
 {
+	if (active_list == NULL) return;
 	dd_task_node *curr = active_list;
-	while (curr != NULL)
+	vTaskPrioritySet(curr->task.t_handle, MAX_USER_TASK_PRIORITY);
+	if (curr->next != NULL)
 	{
-		if (curr->task.t_handle == handle)
-		{
-			return true;
-		}
 		curr = curr->next;
+		vTaskPrioritySet(curr->task.t_handle, MAX_USER_TASK_PRIORITY - 1);
 	}
-	return false;
+		
+	if (curr->next != NULL)
+	{
+		curr = curr->next;
+		vTaskPrioritySet(curr->task.t_handle, MAX_USER_TASK_PRIORITY - 2);
+	}
+	
 }
 
-void push_new_node_to_overdue(dd_task_node *node)
-{
-	node->next = overdue_list;
-	overdue_list = node;
-}
 
-bool move_to_completed(TaskHandle_t completed_handle)
+bool move_to_completed(uint32_t instance_id)
 {
 	dd_task_node *prev = NULL;
 	dd_task_node *curr = active_list;
 
 	while (curr != NULL)
 	{
-		if (completed_handle == curr->task.t_handle)
+		if (instance_id == curr->task.instance_id)
 		{
 
 			if (prev==NULL)
@@ -560,25 +684,6 @@ bool move_to_completed(TaskHandle_t completed_handle)
 	return false;
 }
 
-void move_to_overdue(dd_task_node *node)
-{
-	if (active_list == node)
-	{
-		active_list = node->next;
-	}
-	else
-	{
-		dd_task_node *prev = active_list;
-		while (prev->next != node)
-		{
-			prev = prev->next;
-		}
-		prev->next = node->next;
-	}
-
-	node->next = overdue_list;
-	overdue_list = node;
-}
 
 
 void check_overdue_tasks(uint32_t currentTime)
@@ -592,6 +697,7 @@ void check_overdue_tasks(uint32_t currentTime)
 		{
 
 			dd_task_node *overdue = curr;
+			bool was_running_instance = (overdue->task.instance_id == g_running_instance_id);
 
 
 			if (prev==NULL)
@@ -609,6 +715,12 @@ void check_overdue_tasks(uint32_t currentTime)
 			overdue->next = overdue_list;
 			overdue_list = overdue;
 
+			if (was_running_instance)
+			{
+				g_dispatch_in_flight = false;
+				g_running_instance_id = 0;
+			}
+
 			continue;
 
 		}
@@ -617,39 +729,46 @@ void check_overdue_tasks(uint32_t currentTime)
 	}
 }
 
-void complete_dd_task(TaskHandle_t t_handle)
+void complete_dd_task(uint32_t instance_id)
 {
-
-	xQueueSend(xCompleteQueue, &t_handle, 0); // wait 0 seconds
+	command msg;
+	msg.type = CMD_COMPLETE;
+	msg.value = instance_id;
+	xQueueSend(xCommandQueue, &msg, 0); // wait 0 seconds
 }
 
 uint32_t get_completed_task_list(void)
 {
+	uint32_t count = 0;
 	dd_task_list_req req = GET_COMPLETED_LIST;
-	xQueueSend(xReqQueue, &req, portMAX_DELAY);
-
-	uint32_t count;
-	xQueueReceive(xRespQueue, &count, portMAX_DELAY);
-
+	command msg;
+	msg.type = CMD_MONITOR;
+	msg.req = req;
+	xQueueSend(xCommandQueue, &msg, portMAX_DELAY);
+	xQueueReceive(xCompleteQueue, &count, portMAX_DELAY);
 	return count;
 }
+
 uint32_t get_overdue_task_list(void)
 {
+	uint32_t count = 0;
 	dd_task_list_req req = GET_OVERDUE_LIST;
-	xQueueSend(xReqQueue, &req, portMAX_DELAY);
-
-	uint32_t count;
-	xQueueReceive(xRespQueue, &count, portMAX_DELAY);
+	command msg;
+	msg.type = CMD_MONITOR;
+	msg.req = req;
+	xQueueSend(xCommandQueue, &msg, portMAX_DELAY);
+	xQueueReceive(xOverdueQueue, &count, portMAX_DELAY);
 	return count;
 }
 uint32_t get_active_task_list(void)
 {
+	uint32_t count = 0;
 	dd_task_list_req req = GET_ACTIVE_LIST;
-	xQueueSend(xReqQueue, &req, portMAX_DELAY);
-
-	uint32_t count;
-	xQueueReceive(xRespQueue, &count, portMAX_DELAY);
-
+	command msg;
+	msg.type = CMD_MONITOR;
+	msg.req = req;
+	xQueueSend(xCommandQueue, &msg, portMAX_DELAY);
+	xQueueReceive(xActiveQueue, &count, portMAX_DELAY);
 	return count;
 }
 
