@@ -174,17 +174,15 @@ typedef struct dd_task
 
 uint32_t next1 = 0, next2 = 0, next3 = 0;
 //(TASK LIST) called node instead of list
-typedef struct dd_task
+typedef struct dd_task_node
 {
-	TaskHandle_t t_handle;
-	task_type type;
-	uint32_t task_id;
-	uint32_t work_id;
-	uint32_t release_time;
-	uint32_t absolute_deadline;
-	uint32_t completion_time;
-	uint32_t instance_id;
-} dd_task;
+	dd_task task;
+	struct dd_task_node *next;
+} dd_task_node;
+
+dd_task_node *active_list = NULL;
+dd_task_node *completed_list = NULL;
+dd_task_node *overdue_list = NULL;
 
 void release_dd_task(TaskHandle_t t_handle,
 					task_type type,
