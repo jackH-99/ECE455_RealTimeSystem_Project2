@@ -205,8 +205,7 @@ void release_dd_task(TaskHandle_t t_handle,
 					uint32_t task_id,
 					uint32_t absolute_deadline,
 					SemaphoreHandle_t sem,
-					uint32_t instance_id,
-					uint32_t release_time);
+					uint32_t instance_id);
 
 void complete_dd_task(uint32_t instance_id);
 void adjust_priorities(void);
@@ -224,6 +223,8 @@ void insert_sorted(dd_task new_task);
 void xWorkloadTask_1(void *pvParameters);
 void xWorkloadTask_2(void *pvParameters);
 void xWorkloadTask_3(void *pvParameters);
+
+void vNotifyGenerator();
 
 SemaphoreHandle_t worker1_sem;
 SemaphoreHandle_t worker2_sem;
@@ -247,6 +248,8 @@ QueueHandle_t xCommandQueue = NULL;
 QueueHandle_t xOverdueQueue = NULL;
 QueueHandle_t xActiveQueue = NULL;
 QueueHandle_t xCompleteQueue = NULL;
+QueueHandle_t xTaskQueue = NULL;
+QueueHandle_t xGenQueue = NULL;
 
 typedef enum {
 	CMD_RELEASE,
@@ -256,7 +259,6 @@ typedef enum {
 
 typedef struct {
 	dds_cmd_type type;
-	dd_task task;
 	uint32_t value;
 	dd_task_list_req req;
 } command;
@@ -273,8 +275,6 @@ TaskHandle_t xDDTGHandle;
 
 TimerHandle_t GeneratorTimer;
 
-static bool g_dispatch_in_flight = false;
-static uint32_t g_running_instance_id = 0;
 
 #define MAX_USER_TASK_PRIORITY (configMAX_PRIORITIES - 1)
 
@@ -295,7 +295,8 @@ int main(void)
 	xReleaseQueue = xQueueCreate(10, sizeof(dd_task));
 	xCompleteQueue = xQueueCreate(10, sizeof(TaskHandle_t));
 	*/
-
+	xGenQueue = xQueueCreate(5, sizeof(uint32_t));
+	xTaskQueue = xQueueCreate(6, sizeof(dd_task));
 	xCommandQueue = xQueueCreate(5, sizeof(command));
 	xOverdueQueue = xQueueCreate(5, sizeof(uint32_t));
 	xActiveQueue = xQueueCreate(5, sizeof(uint32_t));
@@ -305,17 +306,17 @@ int main(void)
 	worker3_instance_q = xQueueCreate(5, sizeof(uint32_t));
 
 	GeneratorTimer = xTimerCreate("GenTimer",
-		 						pdMS_TO_TICKS(250),
+		 						250,
 		  						pdTRUE, 
 		 						NULL, 
-		 						xDeadline_Driven_Task_Generator);
+		 						vNotifyGenerator);
 
 
 	xTaskCreate(xDDS_Task,
 			"DDS",
 			512,
 		    NULL,
-			MAX_USER_TASK_PRIORITY,
+			MAX_USER_TASK_PRIORITY - 1,
 			&xDDSHandle);
 
 	xTaskCreate(xMonitor_Task, "MT",
@@ -347,6 +348,11 @@ int main(void)
 }
 
 /*-----------------------------------------------------------*/
+
+void vNotifyGenerator(){
+	uint32_t go = 1;
+	xQueueSend(xGenQueue, &go, 0);
+}
 
 void dispatch_head_task(void)
 {
@@ -396,37 +402,40 @@ void xDDS_Task(void *pvParameters)
 	(void)pvParameters;
 	while(1)
 	{
+		dispatch_head_task();
 
 		command msg;
+		dd_task task;
 		if (xQueueReceive(xCommandQueue, &msg, portMAX_DELAY))
 		{
 			switch(msg.type)
 			{
 				case CMD_RELEASE:
 				{
-					dd_task new_dd_task;
-					new_dd_task.t_handle = msg.task.t_handle;
-					new_dd_task.task_id = msg.task.task_id;
-					new_dd_task.release_time = xTaskGetTickCount();
-					new_dd_task.type = msg.task.type;
-					new_dd_task.absolute_deadline = new_dd_task.release_time + msg.task.absolute_deadline;
-					new_dd_task.completion_time = 0;
-					new_dd_task.sem = msg.task.sem;
-					new_dd_task.instance_id = msg.task.instance_id;
-					insert_sorted(new_dd_task);
-					printf("task id: %d with instance %d released at: %d\n", (int)new_dd_task.task_id, (int)new_dd_task.instance_id, (int)new_dd_task.release_time);
-					adjust_priorities();
-					dispatch_head_task();
+					while (xQueueReceive(xTaskQueue, &task, 0) == pdPASS)
+					{
+						dd_task new_dd_task;
+						new_dd_task.t_handle = task.t_handle;
+						new_dd_task.task_id = task.task_id;
+						new_dd_task.release_time = xTaskGetTickCount();
+						new_dd_task.type = task.type;
+						new_dd_task.absolute_deadline = new_dd_task.release_time + task.absolute_deadline;
+						new_dd_task.completion_time = 0;
+						new_dd_task.sem = task.sem;
+						new_dd_task.instance_id = task.instance_id;
+						insert_sorted(new_dd_task);
+						printf("task id: %d with instance %d released at: %d\n", (int)new_dd_task.task_id, (int)new_dd_task.instance_id, (int)new_dd_task.release_time);
+						adjust_priorities();
+
+					}
+
 					break;
+
 				}
 					
 				case CMD_COMPLETE:
 				{
 					uint32_t instance_id = msg.value;
-					if (instance_id == g_running_instance_id)
-					{
-						g_dispatch_in_flight = false;
-					}
 
 					if (!move_to_completed(instance_id))
 					{
@@ -485,8 +494,8 @@ void xDDS_Task(void *pvParameters)
 
 				}
 			}
-
 		}
+
 		check_overdue_tasks((uint32_t)xTaskGetTickCount());
 
 
@@ -505,49 +514,60 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 	next3 = xTaskGetTickCount();
 	uint32_t firstTime1 = 1, firstTime2 = 1, firstTime3 = 1;
 	uint32_t next_instance_id = 1;
+	uint32_t go = 1;
 
 	while(1)
 	{
-		TickType_t now = xTaskGetTickCount();
-
-
-
-		if (now >= next1 || firstTime1 == 1)
+		if (xQueueReceive(xGenQueue, &go, 0) == pdTRUE)
 		{
 
-		if (firstTime1 == 1){
-		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++, 0);
-		}
-		else{
-		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++);
-		}
-		next1 += pdMS_TO_TICKS(500);
-		firstTime1 = 0;
-		}
-		if (now >= next2 || firstTime2 == 1)
-		{
+			TickType_t now = xTaskGetTickCount();
 
-		if (firstTime2 == 1){
-		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++, 0);
-		}
-		else{
-		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++);
-		}
-		next2 += pdMS_TO_TICKS(500);
-		firstTime2 = 0;
-		}
-		if (now >= next3 || firstTime3 == 1)
-		{
+			if (now >= next1 || firstTime1 == 1)
+			{
 
-		if (firstTime3 == 1){
-		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++, 0);
-		}
-		else{
+			if (firstTime1 == 1){
+			release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++);
+			}
+			else{
+			release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++);
+			}
+			next1 += pdMS_TO_TICKS(500);
+			firstTime1 = 0;
+			}
+
+
+			if (now >= next2 || firstTime2 == 1)
+			{
+
+			if (firstTime2 == 1){
+			release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++);
+			}
+			else{
+			release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++);
+			}
+			next2 += pdMS_TO_TICKS(500);
+			firstTime2 = 0;
+			}
+
+
+			if (now >= next3 || firstTime3 == 1)
+			{
+
+			if (firstTime3 == 1){
 			release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++);
+			}
+			else{
+				release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++);
+			}
+			next3 += pdMS_TO_TICKS(500);
+			firstTime3 = 0;
+			}
+
+
+
 		}
-		next3 += pdMS_TO_TICKS(500);
-		firstTime3 = 0;
-		}
+
 
 
 
@@ -612,19 +632,22 @@ void xWorkloadTask_3(void *pvParameters)
 void release_dd_task(TaskHandle_t t_handle,
 					task_type type,
 					uint32_t task_id,
-					uint32_t absolute_deadline, SemaphoreHandle_t sem, uint32_t instance_id, uint32_t release_time)
+					uint32_t absolute_deadline, SemaphoreHandle_t sem, uint32_t instance_id)
 {
 	command msg;
 	msg.type = CMD_RELEASE;
-	msg.task.t_handle = t_handle;
-	msg.task.type = type;
-	msg.task.task_id = task_id;
-	msg.task.absolute_deadline = absolute_deadline;
-	msg.task.sem = sem;
-	msg.task.instance_id = instance_id;
-	msg.task.completion_time = 0;
+
 
 	xQueueSend(xCommandQueue, &msg, 0);
+	dd_task task;
+	task.t_handle = t_handle;
+	task.type = type;
+	task.task_id = task_id;
+	task.absolute_deadline = absolute_deadline;
+	task.sem = sem;
+	task.instance_id = instance_id;
+	task.completion_time = 0;
+	xQueueSend(xTaskQueue, &task, 0);
 }
 
 void insert_sorted(dd_task new_task)
