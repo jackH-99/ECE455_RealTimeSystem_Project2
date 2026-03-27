@@ -204,7 +204,8 @@ void release_dd_task(TaskHandle_t t_handle,
 					uint32_t task_id,
 					uint32_t absolute_deadline,
 					SemaphoreHandle_t sem,
-					uint32_t instance_id);
+					uint32_t instance_id,
+					uint32_t release_time);
 
 void complete_dd_task(uint32_t instance_id);
 void adjust_priorities(void);
@@ -400,7 +401,7 @@ void xDDS_Task(void *pvParameters)
 					dd_task new_dd_task;
 					new_dd_task.t_handle = msg.task.t_handle;
 					new_dd_task.task_id = msg.task.task_id;
-					new_dd_task.release_time = xTaskGetTickCount();
+					new_dd_task.release_time = msg.task.release_time;
 					new_dd_task.type = msg.task.type;
 					new_dd_task.absolute_deadline = new_dd_task.release_time + msg.task.absolute_deadline;
 					new_dd_task.completion_time = 0;
@@ -506,21 +507,40 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 
 		if (now >= next1 || firstTime1 == 1)
 		{
+
+		if (firstTime1 == 1){
+		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++, 0);
+		}
+		else{
+		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++, next1);
+		}
 		next1 += pdMS_TO_TICKS(500);
 		firstTime1 = 0;
-		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++);
 		}
 		if (now >= next2 || firstTime2 == 1)
 		{
-		firstTime2 = 0;
+
+		if (firstTime2 == 1){
+		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++, 0);
+		}
+		else{
+		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++, next2);
+		}
 		next2 += pdMS_TO_TICKS(500);
-		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++);
+		firstTime2 = 0;
 		}
 		if (now >= next3 || firstTime3 == 1)
 		{
-		next3 += pdMS_TO_TICKS(750);
+
+		if (firstTime3 == 1){
+		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++, 0);
+		}
+		else{
+			release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++, next3);
+		}
+		next3 += pdMS_TO_TICKS(500);
+
 		firstTime3 = 0;
-		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(750), worker3_sem, next_instance_id++);
 		}
 
 		vTaskDelay(10);
@@ -544,7 +564,7 @@ void xWorkloadTask_1(void *pvParameters)
 		xSemaphoreTake(worker1_sem, portMAX_DELAY);
 		xQueueReceive(worker1_instance_q, &instance_id, portMAX_DELAY);
 		start = xTaskGetTickCount();
-		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(95)){}
+		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(100)){}
 		complete_dd_task(instance_id);
 	}
 }
@@ -560,7 +580,7 @@ void xWorkloadTask_2(void *pvParameters)
 		xSemaphoreTake(worker2_sem, portMAX_DELAY);
 		xQueueReceive(worker2_instance_q, &instance_id, portMAX_DELAY);
 		start = xTaskGetTickCount();
-		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(150)){}
+		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(200)){}
 		complete_dd_task(instance_id);
 	}
 }
@@ -574,7 +594,7 @@ void xWorkloadTask_3(void *pvParameters)
 		xSemaphoreTake(worker3_sem, portMAX_DELAY);
 		xQueueReceive(worker3_instance_q, &instance_id, portMAX_DELAY);
 		start = xTaskGetTickCount();
-		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(250)){}
+		while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(200)){}
 		complete_dd_task(instance_id);
 	}
 }
@@ -586,7 +606,7 @@ void xWorkloadTask_3(void *pvParameters)
 void release_dd_task(TaskHandle_t t_handle,
 					task_type type,
 					uint32_t task_id,
-					uint32_t absolute_deadline, SemaphoreHandle_t sem, uint32_t instance_id)
+					uint32_t absolute_deadline, SemaphoreHandle_t sem, uint32_t instance_id, uint32_t release_time)
 {
 	command msg;
 	msg.type = CMD_RELEASE;
@@ -596,7 +616,7 @@ void release_dd_task(TaskHandle_t t_handle,
 	msg.task.absolute_deadline = absolute_deadline;
 	msg.task.sem = sem;
 	msg.task.instance_id = instance_id;
-	msg.task.release_time = 0;
+	msg.task.release_time = release_time;
 	msg.task.completion_time = 0;
 
 	xQueueSend(xCommandQueue, &msg, 0);
@@ -673,8 +693,16 @@ bool move_to_completed(uint32_t instance_id)
 				prev->next = curr->next;
 			}
 			curr->task.completion_time = xTaskGetTickCount();
-			curr->next = completed_list;
-			completed_list = curr;
+			if (curr->task.completion_time > curr->task.absolute_deadline)
+			{
+				curr->next = overdue_list;
+				overdue_list = curr;
+			}
+			else
+			{
+				curr->next = completed_list;
+				completed_list = curr;
+			}
 			return true;
 
 		}
@@ -693,11 +721,12 @@ void check_overdue_tasks(uint32_t currentTime)
 
 	while (curr!= NULL)
 	{
-		if (curr->task.absolute_deadline < currentTime)
+		if (curr->task.completion_time > curr->task.absolute_deadline)
 		{
 
 			dd_task_node *overdue = curr;
 			bool was_running_instance = (overdue->task.instance_id == g_running_instance_id);
+			overdue->task.completion_time = currentTime;
 
 
 			if (prev==NULL)
