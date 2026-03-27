@@ -172,6 +172,7 @@ typedef struct dd_task
 	uint32_t instance_id;
 } dd_task;
 
+uint32_t next1 = 0, next2 = 0, next3 = 0;
 //(TASK LIST) called node instead of list
 typedef struct dd_task_node
 {
@@ -219,7 +220,6 @@ uint32_t get_completed_task_list(void);
 void check_overdue_tasks(uint32_t currentTime);
 bool move_to_completed(uint32_t instance_id);
 void insert_sorted(dd_task new_task);
-void dispatch_head_task_if_idle(void);
 
 void xWorkloadTask_1(void *pvParameters);
 void xWorkloadTask_2(void *pvParameters);
@@ -271,6 +271,8 @@ TaskHandle_t xDDSHandle;
 TaskHandle_t xMonitorHandle;
 TaskHandle_t xDDTGHandle;
 
+TimerHandle_t GeneratorTimer;
+
 static bool g_dispatch_in_flight = false;
 static uint32_t g_running_instance_id = 0;
 
@@ -302,6 +304,11 @@ int main(void)
 	worker2_instance_q = xQueueCreate(5, sizeof(uint32_t));
 	worker3_instance_q = xQueueCreate(5, sizeof(uint32_t));
 
+	GeneratorTimer = xTimerCreate("GenTimer",
+		 						pdMS_TO_TICKS(250),
+		  						pdTRUE, 
+		 						NULL, 
+		 						xDeadline_Driven_Task_Generator);
 
 
 	xTaskCreate(xDDS_Task,
@@ -333,7 +340,7 @@ int main(void)
 
 
 
-
+	xTimerStart(GeneratorTimer, 0);
 	vTaskStartScheduler();
 
 	return 0;
@@ -341,9 +348,9 @@ int main(void)
 
 /*-----------------------------------------------------------*/
 
-void dispatch_head_task_if_idle(void)
+void dispatch_head_task(void)
 {
-	if (g_dispatch_in_flight || active_list == NULL)
+	if (active_list == NULL)
 	{
 		return;
 	}
@@ -378,8 +385,7 @@ void dispatch_head_task_if_idle(void)
 
 	if (queued == pdPASS)
 	{
-		g_dispatch_in_flight = true;
-		g_running_instance_id = instance_id;
+		//yay
 	}
 }
 
@@ -401,7 +407,7 @@ void xDDS_Task(void *pvParameters)
 					dd_task new_dd_task;
 					new_dd_task.t_handle = msg.task.t_handle;
 					new_dd_task.task_id = msg.task.task_id;
-					new_dd_task.release_time = msg.task.release_time;
+					new_dd_task.release_time = xTaskGetTickCount();
 					new_dd_task.type = msg.task.type;
 					new_dd_task.absolute_deadline = new_dd_task.release_time + msg.task.absolute_deadline;
 					new_dd_task.completion_time = 0;
@@ -410,6 +416,7 @@ void xDDS_Task(void *pvParameters)
 					insert_sorted(new_dd_task);
 					printf("task id: %d with instance %d released at: %d\n", (int)new_dd_task.task_id, (int)new_dd_task.instance_id, (int)new_dd_task.release_time);
 					adjust_priorities();
+					dispatch_head_task();
 					break;
 				}
 					
@@ -431,6 +438,7 @@ void xDDS_Task(void *pvParameters)
 					{
 						printf("Instance %d completed at %d \n", (int)instance_id, (int)xTaskGetTickCount());
 						adjust_priorities();
+						dispatch_head_task();
 						break;
 					}
 				}
@@ -480,7 +488,6 @@ void xDDS_Task(void *pvParameters)
 
 		}
 		check_overdue_tasks((uint32_t)xTaskGetTickCount());
-		dispatch_head_task_if_idle();
 
 
 	}
@@ -493,9 +500,9 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 {
 	(void)pvParameters;
 
-	TickType_t next1 = xTaskGetTickCount();
-	TickType_t next2 = xTaskGetTickCount();
-	TickType_t next3 = xTaskGetTickCount();
+	next1 = xTaskGetTickCount();
+	next2 = xTaskGetTickCount();
+	next3 = xTaskGetTickCount();
 	uint32_t firstTime1 = 1, firstTime2 = 1, firstTime3 = 1;
 	uint32_t next_instance_id = 1;
 
@@ -512,7 +519,7 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++, 0);
 		}
 		else{
-		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++, next1);
+		release_dd_task(xWT1Handle, PERIODIC, 1, pdMS_TO_TICKS(500), worker1_sem, next_instance_id++);
 		}
 		next1 += pdMS_TO_TICKS(500);
 		firstTime1 = 0;
@@ -524,7 +531,7 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++, 0);
 		}
 		else{
-		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++, next2);
+		release_dd_task(xWT2Handle, PERIODIC, 2, pdMS_TO_TICKS(500), worker2_sem, next_instance_id++);
 		}
 		next2 += pdMS_TO_TICKS(500);
 		firstTime2 = 0;
@@ -536,14 +543,13 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 		release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++, 0);
 		}
 		else{
-			release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++, next3);
+			release_dd_task(xWT3Handle, PERIODIC, 3, pdMS_TO_TICKS(500), worker3_sem, next_instance_id++);
 		}
 		next3 += pdMS_TO_TICKS(500);
-
 		firstTime3 = 0;
 		}
 
-		vTaskDelay(10);
+
 
 	}
 
@@ -616,7 +622,6 @@ void release_dd_task(TaskHandle_t t_handle,
 	msg.task.absolute_deadline = absolute_deadline;
 	msg.task.sem = sem;
 	msg.task.instance_id = instance_id;
-	msg.task.release_time = release_time;
 	msg.task.completion_time = 0;
 
 	xQueueSend(xCommandQueue, &msg, 0);
@@ -719,21 +724,16 @@ void check_overdue_tasks(uint32_t currentTime)
 	dd_task_node *prev = NULL;
 	dd_task_node *curr = active_list;
 
-	while (curr!= NULL)
+	while (curr != NULL)
 	{
-		if (curr->task.completion_time > curr->task.absolute_deadline)
+		if (currentTime > curr->task.absolute_deadline)
 		{
-
 			dd_task_node *overdue = curr;
-			bool was_running_instance = (overdue->task.instance_id == g_running_instance_id);
 			overdue->task.completion_time = currentTime;
 
-
-			if (prev==NULL)
+			if (prev == NULL)
 			{
-
 				active_list = curr->next;
-
 			}
 			else
 			{
@@ -744,14 +744,7 @@ void check_overdue_tasks(uint32_t currentTime)
 			overdue->next = overdue_list;
 			overdue_list = overdue;
 
-			if (was_running_instance)
-			{
-				g_dispatch_in_flight = false;
-				g_running_instance_id = 0;
-			}
-
 			continue;
-
 		}
 		prev = curr;
 		curr = curr->next;
