@@ -407,7 +407,7 @@ void xDDS_Task(void *pvParameters)
 					new_dd_task.sem = msg.task.sem;
 					new_dd_task.instance_id = msg.task.instance_id;
 					insert_sorted(new_dd_task);
-
+					printf("task id: %d with instance %d released at: %d\n", (int)new_dd_task.task_id, (int)new_dd_task.instance_id, (int)new_dd_task.release_time);
 					adjust_priorities();
 					break;
 				}
@@ -492,9 +492,9 @@ void xDeadline_Driven_Task_Generator(void *pvParameters)
 {
 	(void)pvParameters;
 
-	TickType_t next1 = xTaskGetTickCount() + pdMS_TO_TICKS(500);
-	TickType_t next2 = xTaskGetTickCount() + pdMS_TO_TICKS(500);
-	TickType_t next3 = xTaskGetTickCount() + pdMS_TO_TICKS(750);
+	TickType_t next1 = xTaskGetTickCount();
+	TickType_t next2 = xTaskGetTickCount();
+	TickType_t next3 = xTaskGetTickCount();
 	uint32_t firstTime1 = 1, firstTime2 = 1, firstTime3 = 1;
 	uint32_t next_instance_id = 1;
 
